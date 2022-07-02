@@ -48,3 +48,6 @@ harness = false
 [features]
 bench-complex-all = []
 circom-2 = []
+
+[profile.test]
+opt-level = 3

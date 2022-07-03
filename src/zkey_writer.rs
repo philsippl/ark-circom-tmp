@@ -25,10 +25,14 @@
 //!  PointsC(8)
 //!  PointsH(9)
 //!  Contributions(10)
-use ark_ec::{bn::{Bn, BnParameters}, short_weierstrass_jacobian::GroupAffine};
-use ark_ff::{BigInteger256, FromBytes, PrimeField, ToBytes, BigInteger, Fp256};
+use ark_ec::{
+    bn::{Bn, BnParameters},
+    short_weierstrass_jacobian::GroupAffine,
+};
+use ark_ff::{BigInteger, BigInteger256, Fp256, FromBytes, PrimeField, ToBytes, FpParameters};
 use ark_relations::r1cs::{
-    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, OptimizationGoal,
+    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
+    OptimizationGoal,
 };
 use ark_serialize::{CanonicalDeserialize, SerializationError, Write};
 use ark_std::{log2, rand::thread_rng};
@@ -37,34 +41,48 @@ use num::{BigInt, BigUint};
 
 use std::{
     collections::HashMap,
-    io::{Read, Result as IoResult, Seek, SeekFrom}, path::Path, fs::File, str::FromStr,
+    fs::File,
+    io::{Read, Result as IoResult, Seek, SeekFrom},
+    path::Path,
+    str::FromStr,
 };
 
-use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine, Parameters, FqParameters};
+use ark_bn254::{Bn254, Fq, Fq2, FqParameters, Fr, FrParameters, G1Affine, G2Affine, Parameters};
 use ark_groth16::{generate_random_parameters, ProvingKey, VerifyingKey};
 use num_traits::Zero;
 
 use crate::CircomCircuit;
 
-fn generate_zkey(circuit: CircomCircuit<Bn<Parameters>>, path: &Path) -> IoResult<()> {
+fn generate_parameters(
+    circuit: CircomCircuit<Bn<Parameters>>,
+) -> (
+    ProvingKey<Bn<Parameters>>,
+    ConstraintMatrices<Fp256<FrParameters>>,
+) {
     let mut rng = thread_rng();
     let params = generate_random_parameters::<Bn254, _, _>(circuit.clone(), &mut rng).unwrap();
 
     let cs = ConstraintSystem::new_ref();
     cs.set_optimization_goal(OptimizationGoal::Constraints);
 
-
-    let n_pub_inputs = circuit.get_public_inputs().unwrap().len() as u64;
-    
     circuit.generate_constraints(cs.clone()).unwrap();
-    
-    let n_vars = (cs.to_matrices().unwrap().num_witness_variables as u64) + n_pub_inputs + 1;
+
+    (params, cs.to_matrices().unwrap())
+}
+
+fn serialize_zkey(
+    params: ProvingKey<Bn<Parameters>>,
+    matrices: ConstraintMatrices<Fp256<FrParameters>>,
+    path: &Path,
+) -> IoResult<()> {
+    let n_pub_inputs = (matrices.num_instance_variables as u64) - 1;
+    let n_vars = (matrices.num_witness_variables as u64) + n_pub_inputs;
     let domain_size = n_vars.next_power_of_two();
 
     let mut file = File::create(path)?;
 
     //// header
-    
+
     // magic number (zkey)
     let magic = [122u8, 107u8, 101u8, 121u8];
     file.write_all(&magic)?;
@@ -83,18 +101,12 @@ fn generate_zkey(circuit: CircomCircuit<Bn<Parameters>>, path: &Path) -> IoResul
     file.write_all(&1u32.to_le_bytes())?;
 
     // section 2
-    file.write_all(&2u32.to_le_bytes())?;
-    file.write_all(&660u64.to_le_bytes())?;
+    write_section_header(2, 660, &mut file)?;
 
     file.write_all(&32u32.to_le_bytes())?;
-
-    let (_, q) = BigInt::from_str("21888242871839275222246405745257275088696311157297823662689037894645226208583").unwrap().to_bytes_le();
-    file.write_all(&q)?;
-
+    file.write_all(&FqParameters::MODULUS.to_bytes_le())?;
     file.write_all(&32u32.to_le_bytes())?;
-    
-    let (_, r) = BigInt::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617").unwrap().to_bytes_le();
-    file.write_all(&r)?;
+    file.write_all(&FrParameters::MODULUS.to_bytes_le())?;
 
     file.write_all(&(n_vars as u32).to_le_bytes())?;
     file.write_all(&(n_pub_inputs as u32).to_le_bytes())?;
@@ -102,57 +114,71 @@ fn generate_zkey(circuit: CircomCircuit<Bn<Parameters>>, path: &Path) -> IoResul
 
     write_g1(params.vk.alpha_g1, &mut file)?;
     write_g1(params.beta_g1, &mut file)?;
-    write_g1(params.delta_g1, &mut file)?;
-
     write_g2(params.vk.beta_g2, &mut file)?;
     write_g2(params.vk.gamma_g2, &mut file)?;
+    write_g1(params.delta_g1, &mut file)?;
     write_g2(params.vk.delta_g2, &mut file)?;
 
     // section 3
-    file.write_all(&3u32.to_le_bytes())?;
-    file.write_all(&((n_pub_inputs + 1) * 64).to_le_bytes())?;
+    write_section_header(3, (n_pub_inputs + 1) * 64, &mut file)?;
 
     for el in params.vk.gamma_abc_g1 {
         write_g1(el, &mut file)?;
     }
 
-    // // section 4
-    // let matrix_len = 2 * (n_pub_inputs + cs.to_matrices().unwrap().a_num_non_zero as u64);
-    // let section_size = 4 + matrix_len * (12 + 32);
-    // file.write_all(&4u32.to_le_bytes())?;
-    // file.write_all(&section_size.to_le_bytes())?;
+    // section 4
+    let matrix_len = 2 * (n_pub_inputs + matrices.a_num_non_zero as u64);
+    let section_size = 4 + matrix_len * (12 + 32);
+    write_section_header(4, section_size, &mut file)?;
 
-    // // TODO: write section
+    // TODO: write section
 
-    // // section 5
-    // file.write_all(&5u32.to_le_bytes())?;
-    // file.write_all(&(n_vars * 32).to_le_bytes())?;
+    // section 5
+    write_section_header(5, n_vars * 32, &mut file)?;
 
-    // // section 6
-    // file.write_all(&6u32.to_le_bytes())?;
-    // file.write_all(&(n_vars * 32).to_le_bytes())?;
+    for el in params.a_query {
+        write_g1(el, &mut file)?;
+    }
 
-    // // section 7
-    // file.write_all(&7u32.to_le_bytes())?;
-    // file.write_all(&(n_vars * 32 * 2).to_le_bytes())?;
-    
-    // // section 8
-    // file.write_all(&8u32.to_le_bytes())?;
-    // file.write_all(&((cs.to_matrices().unwrap().num_witness_variables as u64) * 32).to_le_bytes())?;
+    // section 6
+    write_section_header(6, n_vars * 32, &mut file)?;
 
-    // // section 9
-    // file.write_all(&9u32.to_le_bytes())?;
-    // file.write_all(&((cs.to_matrices().unwrap().num_witness_variables as u64) * 32).to_le_bytes())?;
+    for el in params.b_g1_query {
+        write_g1(el, &mut file)?;
+    }
 
-    //dbg!(cs.to_matrices());
-    //dbg!(params);
+    // section 7
+    write_section_header(7, n_vars * 32, &mut file)?;
+
+    for el in params.b_g2_query {
+        write_g2(el, &mut file)?;
+    }
+
+    // section 8
+    write_section_header(8, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+
+    for el in params.l_query {
+        write_g1(el, &mut file)?;
+    }
+
+    // section 9
+    write_section_header(9, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+
+    for el in params.h_query {
+        write_g1(el, &mut file)?;
+    }
 
     Ok(())
 }
 
+fn write_section_header(section_id: u32, section_size: u64, file: &mut File) -> IoResult<()> {
+    file.write_all(&section_id.to_le_bytes())?;
+    file.write_all(&section_size.to_le_bytes())?;
+    Ok(())
+}
+
 fn write_field(field: Fp256<FqParameters>, file: &mut File) -> IoResult<()> {
-    let bigint: BigUint = field.into();
-    file.write_all(&bigint.to_bytes_le())
+    file.write_all(&field.0.to_bytes_le())
 }
 
 fn write_g1(point: G1Affine, file: &mut File) -> IoResult<()> {
@@ -169,39 +195,30 @@ fn write_g2(point: G2Affine, file: &mut File) -> IoResult<()> {
     Ok(())
 }
 
-
 mod tests {
     use std::{fs::File, path::Path, time::Instant};
 
-    use ark_bn254::{Parameters, Bn254};
+    use ark_bn254::{Bn254, Parameters};
     use ark_ec::bn::Bn;
     use ark_groth16::generate_random_parameters;
-    use ark_relations::r1cs::{ConstraintSystem, OptimizationGoal, ConstraintSynthesizer};
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
     use ark_std::rand::thread_rng;
 
-    use crate::{CircomCircuit, CircomConfig, CircomBuilder};
+    use crate::{read_zkey, CircomBuilder, CircomCircuit, CircomConfig};
 
-    use super::generate_zkey;
+    use super::serialize_zkey;
 
     #[test]
     fn xxx() {
-        let cfg = CircomConfig::<Bn254>::new(
-            "./test-vectors/mycircuit.wasm",
-            "./test-vectors/mycircuit.r1cs",
-        )
-        .unwrap();
-        let mut builder = CircomBuilder::new(cfg);
-        builder.push_input("a", 3u32);
-        builder.push_input("b", 11u32);
+        let path = "./test-vectors/test.zkey";
+        let mut file = File::open(path).unwrap();
+        let (params, matrices) = read_zkey(&mut file).unwrap();
 
-        let circom = builder.build().unwrap();
-
-        generate_zkey(circom, Path::new("test.xxx"));
+        serialize_zkey(params, matrices, Path::new("test.xxx")).unwrap();
     }
 
     #[test]
     fn yyy() {
-
         let cfg = CircomConfig::<Bn254>::new(
             "./test-vectors/pubkeygen.wasm",
             "./test-vectors/pubkeygen.r1cs",
@@ -230,9 +247,5 @@ mod tests {
 
         let duration = start.elapsed();
         println!("zkey generation took: {:?}", duration);
-
-
-
-
     }
 }

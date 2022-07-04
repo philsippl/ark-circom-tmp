@@ -79,6 +79,8 @@ fn serialize_zkey(
     let n_vars = (matrices.num_witness_variables as u64) + n_pub_inputs;
     let domain_size = n_vars.next_power_of_two();
 
+    dbg!(n_vars);
+
     let mut file = File::create(path)?;
 
     //// header
@@ -91,8 +93,7 @@ fn serialize_zkey(
     let version = 1u32;
     file.write_all(&version.to_le_bytes())?;
 
-    // we'll have 9 sections
-    let sections = 9u32;
+    let sections = 10u32;
     file.write_all(&sections.to_le_bytes())?;
 
     // section 1
@@ -119,19 +120,19 @@ fn serialize_zkey(
     write_g1(params.delta_g1, &mut file)?;
     write_g2(params.vk.delta_g2, &mut file)?;
 
-    // // section 3
-    // write_section_header(3, (n_pub_inputs + 1) * 64, &mut file)?;
+    // section 3
+    write_section_header(3, (n_pub_inputs + 1) * 64, &mut file)?;
 
-    // for el in params.vk.gamma_abc_g1 {
-    //     write_g1(el, &mut file)?;
-    // }
+    for el in params.vk.gamma_abc_g1 {
+        write_g1(el, &mut file)?;
+    }
 
     // section 4
     let matrix_len = 2 * (n_pub_inputs + matrices.a_num_non_zero as u64);
     let section_size = 4 + matrix_len * (12 + 32);
+    dbg!(section_size);
     write_section_header(4, section_size, &mut file)?;
 
-    // TODO: write section
     file.write_all(&(matrix_len as u32).to_le_bytes())?;
 
     for (m_idx, matrix) in vec![matrices.a, matrices.b].into_iter().enumerate() {
@@ -152,40 +153,45 @@ fn serialize_zkey(
         write_field_fr(Fr::one(), &mut file)?;
     }
 
-    // // section 5
-    // write_section_header(5, n_vars * 32, &mut file)?;
+    // section 5
+    write_section_header(5, n_vars * 64, &mut file)?;
 
-    // for el in params.a_query {
-    //     write_g1(el, &mut file)?;
-    // }
+    for el in params.a_query {
+        write_g1(el, &mut file)?;
+    }
 
-    // // section 6
-    // write_section_header(6, n_vars * 32, &mut file)?;
+    // section 6
+    write_section_header(6, n_vars * 64, &mut file)?;
 
-    // for el in params.b_g1_query {
-    //     write_g1(el, &mut file)?;
-    // }
+    for el in params.b_g1_query {
+        write_g1(el, &mut file)?;
+    }
 
-    // // section 7
-    // write_section_header(7, n_vars * 32, &mut file)?;
+    // section 7
+    write_section_header(7, n_vars * 128, &mut file)?;
 
-    // for el in params.b_g2_query {
-    //     write_g2(el, &mut file)?;
-    // }
+    for el in params.b_g2_query {
+        write_g2(el, &mut file)?;
+    }
 
-    // // section 8
-    // write_section_header(8, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+    // section 8
+    write_section_header(8, ((matrices.num_witness_variables - 1) as u64) * 64, &mut file)?;
 
-    // for el in params.l_query {
-    //     write_g1(el, &mut file)?;
-    // }
+    for el in params.l_query {
+        write_g1(el, &mut file)?;
+    }
 
-    // // section 9
-    // write_section_header(9, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+    // section 9
+    write_section_header(9, (domain_size as u64) * 64, &mut file)?;
 
-    // for el in params.h_query {
-    //     write_g1(el, &mut file)?;
-    // }
+    for el in params.h_query {
+        write_g1(el, &mut file)?;
+    }
+
+    // section 10 
+    write_section_header(10, 68, &mut file)?;
+    // TODO: fix circuit hash
+    file.write_all(&[0u8; 68])?;
 
     Ok(())
 }
@@ -227,7 +233,7 @@ mod tests {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
     use ark_std::rand::thread_rng;
 
-    use crate::{read_zkey, CircomBuilder, CircomCircuit, CircomConfig};
+    use crate::{read_zkey, CircomBuilder, CircomCircuit, CircomConfig, zkey_writer::generate_parameters};
 
     use super::serialize_zkey;
 
@@ -259,14 +265,9 @@ mod tests {
         println!("witness generation took: {:?}", duration);
 
         let start = Instant::now();
-        let mut rng = thread_rng();
-        let params = generate_random_parameters::<Bn254, _, _>(circom.clone(), &mut rng).unwrap();
-
-        let cs = ConstraintSystem::new_ref();
-        cs.set_optimization_goal(OptimizationGoal::Constraints);
-
-        circom.generate_constraints(cs.clone()).unwrap();
-        let xx = cs.to_matrices();
+        
+        let (params, matrices) = generate_parameters(circom);
+        serialize_zkey(params, matrices, Path::new("pubkeygen.zkey")).unwrap();
 
         let duration = start.elapsed();
         println!("zkey generation took: {:?}", duration);

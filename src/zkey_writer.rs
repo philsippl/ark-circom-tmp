@@ -29,7 +29,7 @@ use ark_ec::{
     bn::{Bn, BnParameters},
     short_weierstrass_jacobian::GroupAffine,
 };
-use ark_ff::{BigInteger, BigInteger256, Fp256, FromBytes, PrimeField, ToBytes, FpParameters};
+use ark_ff::{BigInteger, BigInteger256, Fp256, FpParameters, FromBytes, PrimeField, ToBytes, One};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     OptimizationGoal,
@@ -119,12 +119,12 @@ fn serialize_zkey(
     write_g1(params.delta_g1, &mut file)?;
     write_g2(params.vk.delta_g2, &mut file)?;
 
-    // section 3
-    write_section_header(3, (n_pub_inputs + 1) * 64, &mut file)?;
+    // // section 3
+    // write_section_header(3, (n_pub_inputs + 1) * 64, &mut file)?;
 
-    for el in params.vk.gamma_abc_g1 {
-        write_g1(el, &mut file)?;
-    }
+    // for el in params.vk.gamma_abc_g1 {
+    //     write_g1(el, &mut file)?;
+    // }
 
     // section 4
     let matrix_len = 2 * (n_pub_inputs + matrices.a_num_non_zero as u64);
@@ -132,41 +132,60 @@ fn serialize_zkey(
     write_section_header(4, section_size, &mut file)?;
 
     // TODO: write section
+    file.write_all(&(matrix_len as u32).to_le_bytes())?;
 
-    // section 5
-    write_section_header(5, n_vars * 32, &mut file)?;
-
-    for el in params.a_query {
-        write_g1(el, &mut file)?;
+    for (m_idx, matrix) in vec![matrices.a, matrices.b].into_iter().enumerate() {
+        for (c_idx, entry) in matrix.into_iter().enumerate() {
+            for (value, signal) in entry {
+                file.write_all(&(m_idx as u32).to_le_bytes())?;
+                file.write_all(&(c_idx as u32).to_le_bytes())?;
+                file.write_all(&(signal as u32).to_le_bytes())?;
+                write_field_fr(value, &mut file)?;
+            }
+        }
     }
 
-    // section 6
-    write_section_header(6, n_vars * 32, &mut file)?;
-
-    for el in params.b_g1_query {
-        write_g1(el, &mut file)?;
+    for i in 0..(n_pub_inputs + 1) as u32 {
+        file.write_all(&0u32.to_le_bytes())?;
+        file.write_all(&(i + matrices.num_constraints as u32).to_le_bytes())?;
+        file.write_all(&i.to_le_bytes())?;
+        write_field_fr(Fr::one(), &mut file)?;
     }
 
-    // section 7
-    write_section_header(7, n_vars * 32, &mut file)?;
+    // // section 5
+    // write_section_header(5, n_vars * 32, &mut file)?;
 
-    for el in params.b_g2_query {
-        write_g2(el, &mut file)?;
-    }
+    // for el in params.a_query {
+    //     write_g1(el, &mut file)?;
+    // }
 
-    // section 8
-    write_section_header(8, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+    // // section 6
+    // write_section_header(6, n_vars * 32, &mut file)?;
 
-    for el in params.l_query {
-        write_g1(el, &mut file)?;
-    }
+    // for el in params.b_g1_query {
+    //     write_g1(el, &mut file)?;
+    // }
 
-    // section 9
-    write_section_header(9, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+    // // section 7
+    // write_section_header(7, n_vars * 32, &mut file)?;
 
-    for el in params.h_query {
-        write_g1(el, &mut file)?;
-    }
+    // for el in params.b_g2_query {
+    //     write_g2(el, &mut file)?;
+    // }
+
+    // // section 8
+    // write_section_header(8, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+
+    // for el in params.l_query {
+    //     write_g1(el, &mut file)?;
+    // }
+
+    // // section 9
+    // write_section_header(9, (matrices.num_witness_variables as u64) * 32, &mut file)?;
+
+    // for el in params.h_query {
+    //     write_g1(el, &mut file)?;
+    // }
 
     Ok(())
 }
@@ -179,6 +198,10 @@ fn write_section_header(section_id: u32, section_size: u64, file: &mut File) -> 
 
 fn write_field(field: Fp256<FqParameters>, file: &mut File) -> IoResult<()> {
     file.write_all(&field.0.to_bytes_le())
+}
+
+fn write_field_fr(field: Fp256<FrParameters>, file: &mut File) -> IoResult<()> {
+    file.write_all(&Fr::from_repr(field.0).unwrap().0.to_bytes_le())
 }
 
 fn write_g1(point: G1Affine, file: &mut File) -> IoResult<()> {
